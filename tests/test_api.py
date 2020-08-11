@@ -16,12 +16,14 @@ if settings.DISABLE_LOGGING_TEST:
 
 
 class ApiTests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-        self.user = User.objects.create_user(
+    @classmethod
+    def setUpTestData(cls):
+        # Set up data for the whole TestCase
+        cls.client = APIClient()
+        cls.user = User.objects.create_user(
             username="test", email="test@intelowl.com", password="test"
         )
-        self.client.force_authenticate(user=self.user)
+        cls.client.force_authenticate(user=cls.user)
 
     def test_ask_analysis_availability(self):
         md5 = os.environ.get("TEST_MD5", "446c5fbb11b9ce058450555c1c27153c")
@@ -124,7 +126,8 @@ class ApiTests(TestCase):
             "Threatminer_PDNS",
             "Threatminer_Reports_Tagging",
             "Threatminer_Subdomains",
-            "ONYPHE" "URLhaus",
+            "ONYPHE",
+            "URLhaus",
         ]
         observable_name = os.environ.get("TEST_DOMAIN", "google.com")
         md5 = hashlib.md5(observable_name.encode("utf-8")).hexdigest()
