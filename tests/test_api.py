@@ -23,7 +23,9 @@ class ApiTests(TestCase):
         cls.user = User.objects.create_user(
             username="test", email="test@intelowl.com", password="test"
         )
-        cls.client.force_authenticate(user=cls.user)
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.user)
 
     def test_ask_analysis_availability(self):
         md5 = os.environ.get("TEST_MD5", "446c5fbb11b9ce058450555c1c27153c")
