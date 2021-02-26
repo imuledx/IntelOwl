@@ -1,22 +1,31 @@
 import logging
+from celery.execute import send_task
 
 from api_app.exceptions import (
     AnalyzerConfigurationException,
     AnalyzerRunException,
 )
 from api_app.helpers import generate_sha256
+from intel_owl.settings import CELERY_QUEUES
 from .utils import (
     set_job_status,
     set_failed_analyzer,
     get_filepath_filename,
     get_observable_data,
+    adjust_analyzer_config,
 )
-from intel_owl import tasks, settings
 
 logger = logging.getLogger(__name__)
 
 
-def start_analyzers(analyzers_to_execute, analyzers_config, job_id, md5, is_sample):
+def start_analyzers(
+    analyzers_to_execute,
+    analyzers_config,
+    runtime_configuration,
+    job_id,
+    md5,
+    is_sample,
+):
     set_job_status(job_id, "running")
     if is_sample:
         file_path, filename = get_filepath_filename(job_id)
@@ -24,27 +33,35 @@ def start_analyzers(analyzers_to_execute, analyzers_config, job_id, md5, is_samp
         observable_name, observable_classification = get_observable_data(job_id)
 
     for analyzer in analyzers_to_execute:
+        ac = analyzers_config[analyzer]
         try:
-            analyzer_module = analyzers_config[analyzer].get("python_module", None)
-            if not analyzer_module:
-                message = (
+            module = ac.get("python_module", None)
+            if not module:
+                raise AnalyzerConfigurationException(
                     f"no python_module available in config for {analyzer} analyzer?!"
                 )
-                raise AnalyzerConfigurationException(message)
 
-            additional_config_params = analyzers_config[analyzer].get(
-                "additional_config_params", {}
+            additional_config_params = ac.get("additional_config_params", {})
+
+            adjust_analyzer_config(
+                runtime_configuration, additional_config_params, analyzer
             )
+            # get celery queue
+            queue = ac.get("queue", "default")
+            if queue not in CELERY_QUEUES:
+                logger.error(
+                    f"Analyzer {analyzers_to_execute} has a wrong queue."
+                    f" Setting to default"
+                )
+                queue = "default"
+            # construct arguments
 
-            # run analyzer with a celery task asynchronously
             if is_sample:
                 # check if we should run the hash instead of the binary
-                run_hash = analyzers_config[analyzer].get("run_hash", False)
+                run_hash = ac.get("run_hash", False)
                 if run_hash:
                     # check which kind of hash the analyzer needs
-                    run_hash_type = analyzers_config[analyzer].get(
-                        "run_hash_type", "md5"
-                    )
+                    run_hash_type = ac.get("run_hash_type", "md5")
                     if run_hash_type == "md5":
                         hash_value = md5
                     elif run_hash_type == "sha256":
@@ -57,18 +74,17 @@ def start_analyzers(analyzers_to_execute, analyzers_config, job_id, md5, is_samp
                         raise AnalyzerConfigurationException(error_message)
                     # run the analyzer with the hash
                     args = [
+                        f"observable_analyzers.{module}",
                         analyzer,
                         job_id,
                         hash_value,
                         "hash",
                         additional_config_params,
                     ]
-                    getattr(tasks, analyzer_module).apply_async(
-                        args=args, queue=settings.CELERY_TASK_DEFAULT_QUEUE
-                    )
                 else:
                     # run the analyzer with the binary
                     args = [
+                        f"file_analyzers.{module}",
                         analyzer,
                         job_id,
                         file_path,
@@ -76,25 +92,26 @@ def start_analyzers(analyzers_to_execute, analyzers_config, job_id, md5, is_samp
                         md5,
                         additional_config_params,
                     ]
-                    getattr(tasks, analyzer_module).apply_async(
-                        args=args, queue=settings.CELERY_TASK_DEFAULT_QUEUE
-                    )
             else:
                 # observables analyzer case
                 args = [
+                    f"observable_analyzers.{module}",
                     analyzer,
                     job_id,
                     observable_name,
                     observable_classification,
                     additional_config_params,
                 ]
-                getattr(tasks, analyzer_module).apply_async(
-                    args=args, queue=settings.CELERY_TASK_DEFAULT_QUEUE
-                )
+            # run analyzer with a celery task asynchronously
+            stl = ac.get("soft_time_limit", 300)
+            send_task(
+                "run_analyzer",
+                args=args,
+                queue=queue,
+                soft_time_limit=stl,
+            )
 
         except (AnalyzerConfigurationException, AnalyzerRunException) as e:
-            error_message = "job_id {}. analyzer: {}. error: {}".format(
-                job_id, analyzer, e
-            )
-            logger.error(error_message)
-            set_failed_analyzer(analyzer, job_id, error_message)
+            err_msg = f"({analyzer}, job_id #{job_id}) -> Error: {e}"
+            logger.error(err_msg)
+            set_failed_analyzer(analyzer, job_id, err_msg)

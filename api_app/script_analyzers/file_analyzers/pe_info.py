@@ -1,3 +1,8 @@
+# this analyzer leverage a forked version of PEfile ...
+# ... that fixes one common problem encountered in a lot of analysis
+# original repository: https://github.com/erocarrera/pefile
+# forked repository: https://github.com/mlodic/pefile
+
 import logging
 import pefile
 
@@ -30,14 +35,22 @@ class PEInfo(FileAnalyzer):
 
             sections = []
             for section in pe.sections:
+                try:
+                    name = section.Name.decode()
+                except UnicodeDecodeError as e:
+                    name = "UnableToDecode"
+                    logger.warning(
+                        f"Unable to decode section {section.Name} exception {e}"
+                    )
                 section_item = {
-                    "name": section.Name.decode().replace("\u0000", ""),
+                    "name": name,
                     "address": hex(section.VirtualAddress),
                     "virtual_size": hex(section.Misc_VirtualSize),
                     "size": section.SizeOfRawData,
                     "entropy": section.get_entropy(),
                 }
                 sections.append(section_item)
+
             results["sections"] = sections
 
             machine_value = pe.FILE_HEADER.Machine
@@ -87,6 +100,8 @@ class PEInfo(FileAnalyzer):
                     logger.debug(
                         f"PE info error while decoding export table symbols: {e}"
                     )
+            # this is to reduce the output
+            export_table = export_table[:100]
             results["export_table"] = export_table
 
             results["flags"] = full_dump.get("Flags", [])

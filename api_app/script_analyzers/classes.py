@@ -3,19 +3,19 @@ import time
 import logging
 import requests
 import json
-from abc import ABC, abstractmethod
+from abc import ABCMeta, abstractmethod
 
 from api_app.exceptions import (
     AnalyzerRunNotImplemented,
     AnalyzerRunException,
     AnalyzerConfigurationException,
 )
-from .utils import get_basic_report_template, set_report_and_cleanup
+from .utils import get_basic_report_template
 
 logger = logging.getLogger(__name__)
 
 
-class BaseAnalyzerMixin(ABC):
+class BaseAnalyzerMixin(metaclass=ABCMeta):
     """
     Abstract Base class for Analyzers.
     Never inherit from this branch,
@@ -37,8 +37,11 @@ class BaseAnalyzerMixin(ABC):
 
     @abstractmethod
     def run(self):
-        # this should be overwritten in
-        # child class
+        """
+        Called from *start* fn and wrapped in a try-catch block.
+        Should be overwritten in child class
+        :returns report: JSON
+        """
         raise AnalyzerRunNotImplemented(self.analyzer_name)
 
     @abstractmethod
@@ -54,16 +57,47 @@ class BaseAnalyzerMixin(ABC):
         In most cases, this would be overwritten.
         """
 
+    def _validate_result(self, result, level=0, max_recursion=190):
+        """
+        function to validate result, allowing to store inside postgres without errors.
+
+        If the character \u0000 is present in the string, postgres will throw an error
+
+        If an integer is bigger than max_int,
+        Mongodb is not capable to store and will throw an error.
+
+        If we have more than 200 recursion levels, every encoding
+        will throw a maximum_nested_object exception
+        """
+        if level == max_recursion:
+            logger.info(
+                f"We have reached max_recursion {max_recursion} level. "
+                f"The following object will be pruned {result} "
+            )
+            return None
+        if isinstance(result, dict):
+            for key, values in result.items():
+                result[key] = self._validate_result(values, level=level + 1)
+        elif isinstance(result, list):
+            for i, _ in enumerate(result):
+                result[i] = self._validate_result(result[i], level=level + 1)
+        elif isinstance(result, str):
+            return result.replace("\u0000", "")
+        elif isinstance(result, int) and result > 9223372036854775807:  # max int 8bytes
+            result = 9223372036854775807
+        return result
+
     def start(self):
         """
         Entrypoint function to execute the analyzer.
         calls `before_run`, `run`, `after_run`
         in that order with exception handling.
         """
-        self.before_run()
         try:
+            self.before_run()
             self.report = get_basic_report_template(self.analyzer_name)
             result = self.run()
+            result = self._validate_result(result)
             self.report["report"] = result
         except (AnalyzerConfigurationException, AnalyzerRunException) as e:
             self._handle_analyzer_exception(e)
@@ -74,7 +108,6 @@ class BaseAnalyzerMixin(ABC):
 
         # add process time
         self.report["process_time"] = time.time() - self.report["started_time"]
-        set_report_and_cleanup(self.job_id, self.report)
 
         self.after_run()
 
@@ -86,7 +119,7 @@ class BaseAnalyzerMixin(ABC):
             f" Analyzer error: '{err}'"
         )
         logger.error(error_message)
-        self.report["errors"].append(error_message)
+        self.report["errors"].append(str(err))
         self.report["success"] = False
 
     def _handle_base_exception(self, err):
@@ -133,14 +166,14 @@ class ObservableAnalyzer(BaseAnalyzerMixin):
 
     def before_run(self):
         logger.info(
-            "STARTED analyzer: {}, job_id: {}, observable: {}"
-            "".format(self.analyzer_name, self.job_id, self.observable_name)
+            f"STARTED analyzer: {self.__repr__()} -> "
+            f"Observable: {self.observable_name}."
         )
 
     def after_run(self):
         logger.info(
-            f"ENDED analyzer: {self.analyzer_name}, job_id: {self.job_id},"
-            f"observable: {self.observable_name}"
+            f"FINISHED analyzer: {self.__repr__()} -> "
+            f"Observable: {self.observable_name}."
         )
 
 
@@ -166,18 +199,18 @@ class FileAnalyzer(BaseAnalyzerMixin):
 
     def before_run(self):
         logger.info(
-            f"STARTED analyzer: {self.analyzer_name}, job_id: #{self.job_id}"
-            f" ({self.filename}, md5: {self.md5})"
+            f"STARTED analyzer: {self.__repr__()} -> "
+            f"File: ({self.filename}, md5: {self.md5})"
         )
 
     def after_run(self):
         logger.info(
-            f"ENDED analyzer: {self.analyzer_name}, job_id: #{self.job_id},"
-            f" ({self.filename}, md5: {self.md5})"
+            f"FINISHED analyzer: {self.__repr__()} -> "
+            f"File: ({self.filename}, md5: {self.md5})"
         )
 
 
-class DockerBasedAnalyzer(ABC):
+class DockerBasedAnalyzer(metaclass=ABCMeta):
     """
     Abstract class for a docker based analyzer (integration).
     Inherit this branch along with either one of ObservableAnalyzer or FileAnalyzer
@@ -240,7 +273,7 @@ class DockerBasedAnalyzer(ABC):
         for chance in range(self.max_tries):
             time.sleep(self.poll_distance)
             logger.info(
-                f"Result Polling. Try #{chance+1}. Starting the query..."
+                f"Result Polling. Try #{chance + 1}. Starting the query..."
                 f"<-- {self.__repr__()}"
             )
             try:
@@ -250,7 +283,8 @@ class DockerBasedAnalyzer(ABC):
             status = json_data.get("status", None)
             if status and status == "running":
                 logger.info(
-                    f"Poll number #{chance+1}, status: 'running' <-- {self.__repr__()}"
+                    f"Poll number #{chance + 1}, "
+                    f"status: 'running' <-- {self.__repr__()}"
                 )
             else:
                 got_result = True
@@ -279,7 +313,7 @@ class DockerBasedAnalyzer(ABC):
         """
 
         # handle in case this is a test
-        if hasattr(self, "is_test"):
+        if hasattr(self, "is_test") and getattr(self, "is_test"):
             # only happens in case of testing
             self.report["success"] = True
             return {}
@@ -295,7 +329,9 @@ class DockerBasedAnalyzer(ABC):
                 resp1 = requests.post(self.url, json=req_data)
         except requests.exceptions.ConnectionError:
             raise AnalyzerConfigurationException(
-                f"{self.name} docker container is not running."
+                f"{self.name} docker container is not running.\n"
+                f"You have to enable it using the appropriate "
+                f"parameter when executing start.py."
             )
 
         # step #2: raise AnalyzerRunException in case of error

@@ -9,58 +9,60 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from api_app.models import Job
 from api_app.script_analyzers.observable_analyzers import (
     abuseipdb,
     censys,
     shodan,
-    fortiguard,
+    ipinfo,
     maxmind,
     greynoise,
-    googlesf,
-    otx,
+    stratosphere,
     talos,
     tor,
     circl_pssl,
     circl_pdns,
     robtex,
-    vt2_get,
-    ha_get,
-    vt3_get,
-    misp,
     dnsdb,
     honeydb,
     hunter,
     mb_get,
-    onyphe,
     threatminer,
-    urlhaus,
-    active_dns,
     auth0,
     securitytrails,
     cymru,
     tranco,
-    thug_url,
+    whoisxmlapi,
+    checkdmarc,
+    urlscan,
+    phishtank,
+    dnstwist,
+    zoomeye,
+    emailrep,
+    triage_search,
+    inquest,
+    wigle,
+    crxcavator,
 )
-from .utils import (
+from api_app.models import Job
+from .mock_utils import (
+    MockResponse,
     MockResponseNoOp,
+    mock_connections,
     mocked_requests,
 )
+from .utils import (
+    CommonTestCases_observables,
+    CommonTestCases_ip_url_domain,
+    CommonTestCases_ip_domain_hash,
+    CommonTestCases_url_domain,
+)
+
 from intel_owl import settings
 
 logger = logging.getLogger(__name__)
-# disable logging library for travis
+# disable logging library for Continuous Integration
 if settings.DISABLE_LOGGING_TEST:
     logging.disable(logging.CRITICAL)
-
-
-# it is optional to mock requests
-def mock_connections(decorator):
-    return decorator if settings.MOCK_CONNECTIONS else lambda x: x
-
-
-def mocked_pymisp(*args, **kwargs):
-    return MockResponseNoOp({}, 200)
 
 
 def mocked_pypssl(*args, **kwargs):
@@ -71,11 +73,38 @@ def mocked_pypdns(*args, **kwargs):
     return MockResponseNoOp({}, 200)
 
 
+def mocked_dnsdb_v2_request(*args, **kwargs):
+    return MockResponse(
+        json_data={},
+        status_code=200,
+        text='{"cond":"begin"}\n'
+        '{"obj":{"count":1,"zone_time_first":1349367341,'
+        '"zone_time_last":1440606099,"rrname":"mocked.data.net.",'
+        '"rrtype":"A","bailiwick":"net.",'
+        '"rdata":"0.0.0.0"}}\n'
+        '{"cond":"limited","msg":"Result limit reached"}\n',
+    )
+
+
+def mocked_triage_get(*args, **kwargs):
+    return MockResponse({"tasks": {"task_1": {}, "task_2": {}}, "data": []}, 200)
+
+
+def mocked_triage_post(*args, **kwargs):
+    return MockResponse({"id": "sample_id", "status": "pending"}, 200)
+
+
 @mock_connections(patch("requests.get", side_effect=mocked_requests))
 @mock_connections(patch("requests.post", side_effect=mocked_requests))
-class IPAnalyzersTests(TestCase):
-    def setUp(self):
-        params = {
+class IPAnalyzersTests(
+    CommonTestCases_ip_domain_hash,
+    CommonTestCases_ip_url_domain,
+    CommonTestCases_observables,
+    TestCase,
+):
+    @staticmethod
+    def get_params():
+        return {
             "source": "test",
             "is_sample": False,
             "observable_name": os.environ.get("TEST_IP", "8.8.8.8"),
@@ -83,14 +112,6 @@ class IPAnalyzersTests(TestCase):
             "force_privacy": False,
             "analyzers_requested": ["test"],
         }
-        params["md5"] = hashlib.md5(
-            params["observable_name"].encode("utf-8")
-        ).hexdigest()
-        test_job = Job(**params)
-        test_job.save()
-        self.job_id = test_job.id
-        self.observable_name = test_job.observable_name
-        self.observable_classification = test_job.observable_classification
 
     def test_abuseipdb(self, mock_get=None, mock_post=None):
         report = abuseipdb.AbuseIPDB(
@@ -135,6 +156,16 @@ class IPAnalyzersTests(TestCase):
     def test_shodan(self, mock_get=None, mock_post=None):
         report = shodan.Shodan(
             "Shodan",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    def test_ipinfo(self, mock_get=None, mock_post=None):
+        report = ipinfo.IPInfo(
+            "IPInfo",
             self.job_id,
             self.observable_name,
             self.observable_classification,
@@ -203,19 +234,13 @@ class IPAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_gsf(self, mock_get=None, mock_post=None):
-        report = googlesf.GoogleSF(
-            "GoogleSafeBrowsing",
+    def test_stratos(self, mock_get=None, mock_post=None):
+        report = stratosphere.Stratos(
+            "Stratosphere_Blacklist",
             self.job_id,
             self.observable_name,
             self.observable_classification,
             {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_otx(self, mock_get=None, mock_post=None):
-        report = otx.OTX(
-            "OTX", self.job_id, self.observable_name, self.observable_classification, {}
         ).start()
         self.assertEqual(report.get("success", False), True)
 
@@ -270,7 +295,8 @@ class IPAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_dnsdb(self, mock_get=None, mock_post=None):
+    @mock_connections(patch("requests.get", side_effect=mocked_dnsdb_v2_request))
+    def test_dnsdb(self, mock_get=None, mock_post=None, mock_text_response=None):
         report = dnsdb.DNSdb(
             "DNSDB",
             self.job_id,
@@ -280,9 +306,9 @@ class IPAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_vt2_get(self, mock_get=None, mock_post=None):
-        report = vt2_get.VirusTotalv2(
-            "VT_v2_Get",
+    def test_whoisxmlapi_ip(self, mock_get=None, mock_post=None):
+        report = whoisxmlapi.Whoisxmlapi(
+            "Whoisxmlapi_ip",
             self.job_id,
             self.observable_name,
             self.observable_classification,
@@ -290,64 +316,29 @@ class IPAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_ha_get(self, mock_get=None, mock_post=None):
-        report = ha_get.HybridAnalysisGet(
-            "HybridAnalysis_Get_Observable",
+    def test_zoomeye(self, mock_get=None, mock_post=None):
+        report = zoomeye.ZoomEye(
+            "ZoomEye",
             self.job_id,
             self.observable_name,
             self.observable_classification,
             {},
         ).start()
         self.assertEqual(report.get("success", False), True)
-
-    def test_vt3_get(self, mock_get=None, mock_post=None):
-        report = vt3_get.VirusTotalv3(
-            "VT_v3_Get",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    @mock_connections(patch("pymisp.ExpandedPyMISP", side_effect=mocked_pymisp))
-    def test_misp_first(self, mock_get=None, mock_post=None, mock_pymisp=None):
-        report = misp.MISP(
-            "MISP_FIRST",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"api_key_name": "FIRST_MISP_API", "url_key_name": "FIRST_MISP_URL"},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_onyphe(self, mock_get=None, mock_post=None):
-        report = onyphe.Onyphe(
-            "ONYPHE",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def active_dns_classic_reverse(self, mock_get=None, mock_post=None):
-        report = active_dns.active_dns.ActiveDNS(
-            "ActiveDNS_Classic_reverse",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"service": "classic"},
-        ).start()
-
-        self.assertEqual(report.get("success", False), True, f"report: {report}")
 
 
 @mock_connections(patch("requests.get", side_effect=mocked_requests))
 @mock_connections(patch("requests.post", side_effect=mocked_requests))
-class DomainAnalyzersTests(TestCase):
-    def setUp(self):
-        params = {
+class DomainAnalyzersTests(
+    CommonTestCases_ip_domain_hash,
+    CommonTestCases_ip_url_domain,
+    CommonTestCases_url_domain,
+    CommonTestCases_observables,
+    TestCase,
+):
+    @staticmethod
+    def get_params():
+        return {
             "source": "test",
             "is_sample": False,
             "observable_name": os.environ.get("TEST_DOMAIN", "www.google.com"),
@@ -355,24 +346,6 @@ class DomainAnalyzersTests(TestCase):
             "force_privacy": False,
             "analyzers_requested": ["test"],
         }
-        params["md5"] = hashlib.md5(
-            params["observable_name"].encode("utf-8")
-        ).hexdigest()
-        test_job = Job(**params)
-        test_job.save()
-        self.job_id = test_job.id
-        self.observable_name = test_job.observable_name
-        self.observable_classification = test_job.observable_classification
-
-    def test_fortiguard(self, mock_get=None, mock_post=None):
-        report = fortiguard.Fortiguard(
-            "Fortiguard",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
 
     def test_tranco(self, mock_get=None, mock_post=None):
         report = tranco.Tranco(
@@ -414,22 +387,6 @@ class DomainAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_gsf(self, mock_get=None, mock_post=None):
-        report = googlesf.GoogleSF(
-            "GoogleSafeBrowsing",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_otx(self, mock_get=None, mock_post=None):
-        report = otx.OTX(
-            "OTX", self.job_id, self.observable_name, self.observable_classification, {}
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
     @mock_connections(patch("pypdns.PyPDNS", side_effect=mocked_pypdns))
     def test_circl_pdns(self, mock_get=None, mock_post=None, sessions_get=None):
         report = circl_pdns.CIRCL_PDNS(
@@ -451,7 +408,8 @@ class DomainAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_dnsdb(self, mock_get=None, mock_post=None):
+    @mock_connections(patch("requests.get", side_effect=mocked_dnsdb_v2_request))
+    def test_dnsdb(self, mock_get=None, mock_post=None, mock_text_response=None):
         report = dnsdb.DNSdb(
             "DNSDB",
             self.job_id,
@@ -461,9 +419,9 @@ class DomainAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_vt2_get(self, mock_get=None, mock_post=None):
-        report = vt2_get.VirusTotalv2(
-            "VT_v2_Get",
+    def test_whoisxmlapi_domain(self, mock_get=None, mock_post=None):
+        report = whoisxmlapi.Whoisxmlapi(
+            "Whoisxmlapi_domain",
             self.job_id,
             self.observable_name,
             self.observable_classification,
@@ -471,171 +429,59 @@ class DomainAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_ha_get(self, mock_get=None, mock_post=None):
-        report = ha_get.HybridAnalysisGet(
-            "HybridAnalysis_Get_Observable",
+    def test_checkdmarc(self, mock_get=None, mock_post=None):
+        report = checkdmarc.CheckDMARC(
+            "CheckDMARC",
             self.job_id,
             self.observable_name,
             self.observable_classification,
             {},
         ).start()
+
         self.assertEqual(report.get("success", False), True)
 
-    def test_vt3_get(self, mock_get=None, mock_post=None):
-        report = vt3_get.VirusTotalv3(
-            "VT_v3_Get",
+    def test_dnstwist(self, mock_get=None, mock_post=None):
+        report = dnstwist.DNStwist(
+            "DNStwist",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {"tld": True, "mxcheck": True, "ssdeep": True},
+        ).start()
+
+        self.assertEqual(report.get("success", False), True)
+
+    def test_zoomeye(self, mock_get=None, mock_post=None):
+        report = zoomeye.ZoomEye(
+            "ZoomEye",
             self.job_id,
             self.observable_name,
             self.observable_classification,
             {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    @mock_connections(patch("pymisp.ExpandedPyMISP", side_effect=mocked_pymisp))
-    def test_misp_first(self, mock_get=None, mock_post=None, mock_pymisp=None):
-        report = misp.MISP(
-            "MISP_FIRST",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"api_key_name": "FIRST_MISP_API", "url_key_name": "FIRST_MISP_URL"},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_onyphe(self, mock_get=None, mock_post=None):
-        report = onyphe.Onyphe(
-            "ONYPHE",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_urlhaus(self, mock_get=None, mock_post=None):
-        report = urlhaus.URLHaus(
-            "URLhaus",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_active_dns(self, mock_get=None, mock_post=None):
-        # Google
-        google_report = active_dns.ActiveDNS(
-            "ActiveDNS_Google",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"service": "google"},
-        ).start()
-
-        self.assertEqual(
-            google_report.get("success", False), True, f"google_report: {google_report}"
-        )
-
-        # CloudFlare
-        cloudflare_report = active_dns.ActiveDNS(
-            "ActiveDNS_CloudFlare",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"service": "cloudflare"},
-        ).start()
-
-        self.assertEqual(
-            cloudflare_report.get("success", False),
-            True,
-            f"cloudflare_report: {cloudflare_report}",
-        )
-        # Classic
-        classic_report = active_dns.ActiveDNS(
-            "ActiveDNS_Classic",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"service": "classic"},
-        ).start()
-
-        self.assertEqual(
-            classic_report.get("success", False),
-            True,
-            f"classic_report: {classic_report}",
-        )
-
-    def test_cloudFlare_malware(self, mock_get=None, mock_post=None):
-        report = active_dns.ActiveDNS(
-            "ActiveDNS_CloudFlare_Malware",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"service": "cloudflare_malware"},
-        ).start()
-
-        self.assertEqual(report.get("success", False), True, f"report: {report}")
-
-    def test_thug_url(self, mock_get=None, mock_post=None):
-        additional_params = {"test": True}
-        report = thug_url.ThugUrl(
-            "Thug_URL_Info",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            additional_params,
         ).start()
         self.assertEqual(report.get("success", False), True)
 
 
 @mock_connections(patch("requests.get", side_effect=mocked_requests))
 @mock_connections(patch("requests.post", side_effect=mocked_requests))
-class URLAnalyzersTests(TestCase):
-    def setUp(self):
-        params = {
+class URLAnalyzersTests(
+    CommonTestCases_ip_url_domain,
+    CommonTestCases_url_domain,
+    CommonTestCases_observables,
+    TestCase,
+):
+    @staticmethod
+    def get_params():
+        return {
             "source": "test",
             "is_sample": False,
             "observable_name": os.environ.get(
-                "TEST_URL", "https://www.google.com/search?test"
+                "TEST_URL", "https://www.honeynet.org/projects/active/intel-owl/"
             ),
             "observable_classification": "url",
             "force_privacy": False,
             "analyzers_requested": ["test"],
         }
-        params["md5"] = hashlib.md5(
-            params["observable_name"].encode("utf-8")
-        ).hexdigest()
-        test_job = Job(**params)
-        test_job.save()
-        self.job_id = test_job.id
-        self.observable_name = test_job.observable_name
-        self.observable_classification = test_job.observable_classification
-
-    def test_fortiguard(self, mock_get=None, mock_post=None):
-        report = fortiguard.Fortiguard(
-            "Fortiguard",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_gsf(self, mock_get=None, mock_post=None):
-        report = googlesf.GoogleSF(
-            "GoogleSafeBrowsing",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_otx(self, mock_get=None, mock_post=None):
-        report = otx.OTX(
-            "OTX", self.job_id, self.observable_name, self.observable_classification, {}
-        ).start()
-        self.assertEqual(report.get("success", False), True)
 
     @mock_connections(patch("pypdns.PyPDNS", side_effect=mocked_pypdns))
     def test_circl_pdns(self, mock_get=None, mock_post=None, sessions_get=None):
@@ -645,6 +491,33 @@ class URLAnalyzersTests(TestCase):
             self.observable_name,
             self.observable_classification,
             {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    def test_phishtank(self, *args):
+        report = phishtank.Phishtank(
+            "Phishtank",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    @mock_connections(
+        patch(
+            "requests.Session.post",
+            side_effect=lambda *args, **kwargs: MockResponse({"api": "test"}, 200),
+        )
+    )
+    @mock_connections(patch("requests.Session.get", side_effect=mocked_requests))
+    def test_urlscan_submit_result(self, *args):
+        report = urlscan.UrlScan(
+            "UrlScan_Submit_Result",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {"urlscan_analysis": "submit_result"},
         ).start()
         self.assertEqual(report.get("success", False), True)
 
@@ -658,9 +531,11 @@ class URLAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_vt2_get(self, mock_get=None, mock_post=None):
-        report = vt2_get.VirusTotalv2(
-            "VT_v2_Get",
+    @mock_connections(patch("requests.Session.get", side_effect=mocked_triage_get))
+    @mock_connections(patch("requests.Session.post", side_effect=mocked_triage_post))
+    def test_triage_search(self, *args):
+        report = triage_search.TriageSearch(
+            "Triage_Search",
             self.job_id,
             self.observable_name,
             self.observable_classification,
@@ -668,53 +543,27 @@ class URLAnalyzersTests(TestCase):
         ).start()
         self.assertEqual(report.get("success", False), True)
 
-    def test_vt3_get(self, mock_get=None, mock_post=None):
-        report = vt3_get.VirusTotalv3(
-            "VT_v3_Get",
+    @mock_connections(patch("requests.Session.get", side_effect=mocked_triage_get))
+    @mock_connections(patch("requests.Session.post", side_effect=mocked_triage_post))
+    def test_triage_submit(self, *args):
+        report = triage_search.TriageSearch(
+            "Triage_Search",
             self.job_id,
             self.observable_name,
             self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_onyphe(self, mock_get=None, mock_post=None):
-        report = onyphe.Onyphe(
-            "ONYPHE",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_urlhaus(self, mock_get=None, mock_post=None):
-        report = urlhaus.URLHaus(
-            "URLhaus",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_thug_url(self, mock_get=None, mock_post=None):
-        additional_params = {"test": True}
-        report = thug_url.ThugUrl(
-            "Thug_URL_Info",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            additional_params,
+            {"analysis_type": "submit"},
         ).start()
         self.assertEqual(report.get("success", False), True)
 
 
 @mock_connections(patch("requests.get", side_effect=mocked_requests))
 @mock_connections(patch("requests.post", side_effect=mocked_requests))
-class HashAnalyzersTests(TestCase):
-    def setUp(self):
-        params = {
+class HashAnalyzersTests(
+    CommonTestCases_ip_domain_hash, CommonTestCases_observables, TestCase
+):
+    @staticmethod
+    def get_params():
+        return {
             "source": "test",
             "is_sample": False,
             "observable_name": os.environ.get(
@@ -724,61 +573,6 @@ class HashAnalyzersTests(TestCase):
             "force_privacy": False,
             "analyzers_requested": ["test"],
         }
-        params["md5"] = hashlib.md5(
-            params["observable_name"].encode("utf-8")
-        ).hexdigest()
-        test_job = Job(**params)
-        test_job.save()
-        self.job_id = test_job.id
-        self.observable_name = test_job.observable_name
-        self.observable_classification = test_job.observable_classification
-
-    def test_otx(self, mock_get=None, mock_post=None):
-        report = otx.OTX(
-            "OTX", self.job_id, self.observable_name, self.observable_classification, {}
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_vt2_get(self, mock_get=None, mock_post=None):
-        report = vt2_get.VirusTotalv2(
-            "VT_v2_Get",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_ha_get(self, mock_get=None, mock_post=None):
-        report = ha_get.HybridAnalysisGet(
-            "HybridAnalysis_Get_Observable",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    def test_vt3_get(self, mock_get=None, mock_post=None):
-        report = vt3_get.VirusTotalv3(
-            "VT_v3_Get",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
-
-    @mock_connections(patch("pymisp.ExpandedPyMISP", side_effect=mocked_pymisp))
-    def test_misp_first(self, mock_get=None, mock_post=None, mock_pymisp=None):
-        report = misp.MISP(
-            "MISP_FIRST",
-            self.job_id,
-            self.observable_name,
-            self.observable_classification,
-            {"api_key_name": "FIRST_MISP_API", "url_key_name": "FIRST_MISP_URL"},
-        ).start()
-        self.assertEqual(report.get("success", False), True)
 
     def test_mb_get(self, mock_get=None, mock_post=None):
         report = mb_get.MB_GET(
@@ -793,6 +587,110 @@ class HashAnalyzersTests(TestCase):
     def test_cymru_get(self, mock_get=None, mock_post=None):
         report = cymru.Cymru(
             "Cymru_Hash_Registry_Get_Observable",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    @mock_connections(patch("requests.Session.get", side_effect=mocked_triage_get))
+    @mock_connections(patch("requests.Session.post", side_effect=mocked_triage_post))
+    def test_triage_search(self, *args):
+        report = triage_search.TriageSearch(
+            "Triage_Search",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+
+class GenericAnalyzersTest(TestCase):
+    """
+    Tests against observable that are into generic classification, like email addresses,
+    phone number and so on
+    """
+
+    @staticmethod
+    def get_params():
+        return {
+            "source": "test",
+            "is_sample": False,
+            "observable_name": os.environ.get("TEST_GENERIC", "email@example.com"),
+            "observable_classification": "generic",
+            "force_privacy": False,
+            "analyzers_requested": ["test"],
+        }
+
+    def setUp(self):
+        params = self.get_params()
+        params["md5"] = hashlib.md5(
+            params["observable_name"].encode("utf-8")
+        ).hexdigest()
+        test_job = Job(**params)
+        test_job.save()
+        self.job_id = test_job.id
+        self.observable_name = test_job.observable_name
+        self.observable_classification = test_job.observable_classification
+
+    @mock_connections(patch("requests.get", side_effect=mocked_requests))
+    def test_emailrep(self, mock_get=None):
+        report = emailrep.EmailRep(
+            "EmailRep",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    def test_InQuest_IOCdb(self, mock_get=None, mock_post=None):
+        report = inquest.InQuest(
+            "InQuest_IOCdb",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {"inquest_analysis": "iocdb_search"},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    def test_InQuest_REPdb(self, mock_get=None, mock_post=None):
+        report = inquest.InQuest(
+            "InQuest_REPdb",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {"inquest_analysis": "repdb_search"},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    def test_InQuest_DFI(self, mock_get=None, mock_post=None):
+        report = inquest.InQuest(
+            "InQuest_DFI",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {"inquest_analysis": "dfi_search"},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    @mock_connections(patch("requests.get", side_effect=mocked_requests))
+    def test_wigle(self, mock_get=None):
+        report = wigle.WiGLE(
+            "WiGLE",
+            self.job_id,
+            self.observable_name,
+            self.observable_classification,
+            {},
+        ).start()
+        self.assertEqual(report.get("success", False), True)
+
+    @mock_connections(patch("requests.get", side_effect=mocked_requests))
+    def test_crxcavator(self, mock_get=None):
+        report = crxcavator.CRXcavator(
+            "CRXcavator",
             self.job_id,
             self.observable_name,
             self.observable_classification,

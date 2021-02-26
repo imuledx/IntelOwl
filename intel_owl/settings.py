@@ -9,21 +9,17 @@ from intel_owl import secrets
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get("DJANGO_SECRET", "") or get_random_secret_key()
+SECRET_KEY = os.environ.get("DJANGO_SECRET", None) or get_random_secret_key()
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True if os.environ.get("DEBUG", False) == "True" else False
+DEBUG = os.environ.get("DEBUG", False) == "True"
 
 DJANGO_LOG_DIRECTORY = "/var/log/intel_owl/django"
 PROJECT_LOCATION = "/opt/deploy/intel_owl"
 MEDIA_ROOT = "/opt/deploy/files_required"
-CERTS_DIR = f"{PROJECT_LOCATION}/certs"
-DISABLE_LOGGING_TEST = (
-    True if os.environ.get("DISABLE_LOGGING_TEST", False) == "True" else False
-)
-MOCK_CONNECTIONS = (
-    True if os.environ.get("MOCK_CONNECTIONS", False) == "True" else False
-)
+DISABLE_LOGGING_TEST = os.environ.get("DISABLE_LOGGING_TEST", False) == "True"
+MOCK_CONNECTIONS = os.environ.get("MOCK_CONNECTIONS", False) == "True"
+LDAP_ENABLED = os.environ.get("LDAP_ENABLED", False) == "True"
 
 # Security Stuff
 HTTPS_ENABLED = os.environ.get("HTTPS_ENABLED", "not_enabled")
@@ -44,9 +40,14 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.postgres",
+    "memoize",
     "rest_framework",
-    "rest_framework_simplejwt.token_blacklist",
+    "durin",
+    "guardian",
     "api_app.apps.ApiAppConfig",
+    "django_elasticsearch_dsl",
+    "django_nose",
 ]
 
 MIDDLEWARE = [
@@ -80,12 +81,26 @@ TEMPLATES = [
 WSGI_APPLICATION = "intel_owl.wsgi.application"
 
 REST_FRAMEWORK = {
-    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer",],
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+    ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "durin.auth.CachedTokenAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "EXCEPTION_HANDLER": "rest_framework.views.exception_handler",
+}
+
+TEST_RUNNER = "django_nose.NoseTestSuiteRunner"
+
+# Django-Rest-Durin
+REST_DURIN = {
+    "DEFAULT_TOKEN_TTL": timedelta(days=14),
+    "TOKEN_CHARACTER_LENGTH": 32,
+    "USER_SERIALIZER": "durin.serializers.UserSerializer",
+    "AUTH_HEADER_PREFIX": "Token",
+    "TOKEN_CACHE_TIMEOUT": 300,  # 5 minutes
+    "REFRESH_TOKEN_ON_LOGIN": True,
 }
 
 DB_HOST = secrets.get_secret("DB_HOST")
@@ -105,31 +120,26 @@ DATABASES = {
     },
 }
 
-# Simple JWT Stuff
-
-CLIENT_TOKEN_LIFETIME_DAYS = int(os.environ.get("PYINTELOWL_TOKEN_LIFETIME", 7))
-
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
-    "REFRESH_TOKEN_LIFETIME": timedelta(hours=12),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
-    "ALGORITHM": "HS512",
-    "SIGNING_KEY": SECRET_KEY,
-    "AUTH_HEADER_TYPES": ("Token",),
-    "USER_ID_FIELD": "id",
-    "USER_ID_CLAIM": "user_id",
-    "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
-    "TOKEN_TYPE_CLAIM": "token_type",
-    "JTI_CLAIM": "jti",
-    "PYINTELOWL_TOKEN_LIFETIME": timedelta(days=CLIENT_TOKEN_LIFETIME_DAYS),
-}
-
+# Elastic Search Configuration
+if os.environ.get("ELASTICSEARCH_ENABLED", False) == "True":
+    ELASTICSEARCH_DSL = {
+        "default": {"hosts": os.environ.get("ELASTICSEARCH_HOST")},
+    }
+    ELASTICSEARCH_DSL_INDEX_SETTINGS = {
+        "number_of_shards": int(os.environ.get("ELASTICSEARCH_NO_OF_SHARDS")),
+        "number_of_replicas": int(os.environ.get("ELASTICSEARCH_NO_OF_REPLICAS")),
+    }
+else:
+    ELASTICSEARCH_DSL_AUTOSYNC = False
+    ELASTICSEARCH_DSL = {
+        "default": {"hosts": ""},
+    }
 
 # CELERY STUFF
 CELERY_BROKER_URL = secrets.get_secret("CELERY_BROKER_URL")
 CELERY_ACCEPT_CONTENT = ["application/json"]
 CELERY_TASK_SERIALIZER = "json"
+CELERY_IGNORE_RESULT = True
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "Europe/Rome"
 CELERY_IMPORTS = ("intel_owl.tasks",)
@@ -138,9 +148,13 @@ CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 # these two are needed to enable priority and correct tasks execution
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-CELERY_TASK_DEFAULT_QUEUE = "analyzers_queue"
+CELERY_QUEUES = os.environ.get("CELERY_QUEUES", "default").split(",")
+# this is to avoid RAM issues caused by long usage of this tool
+CELERY_WORKER_MAX_TASKS_PER_CHILD = 200
+# value is in kilobytes
+CELERY_WORKER_MAX_MEMORY_PER_CHILD = 4000
 
-AWS_SQS = True if os.environ.get("AWS_SQS", False) == "True" else False
+AWS_SQS = os.environ.get("AWS_SQS", False) == "True"
 if AWS_SQS:
     # this is for AWS SQS support
     CELERY_BROKER_TRANSPORT_OPTIONS = {
@@ -150,8 +164,18 @@ if AWS_SQS:
         "wait_time_seconds": 20,
     }
 
+# Django Guardian
+GUARDIAN_RAISE_403 = True
+
 # Auth backends
-AUTHENTICATION_BACKENDS = ("django.contrib.auth.backends.ModelBackend",)
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "guardian.backends.ObjectPermissionBackend",
+]
+if LDAP_ENABLED:
+    from configuration.ldap_config import *  # lgtm [py/polluting-import]
+
+    AUTHENTICATION_BACKENDS.append("django_auth_ldap.backend.LDAPBackend")
 
 # Password validation
 
@@ -159,9 +183,15 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
-    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",},
-    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",},
-    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",},
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+    },
 ]
 
 
@@ -192,7 +222,6 @@ LOGGING = {
     "formatters": {
         "stdfmt": {
             "format": "%(asctime)s - %(name)s - %(funcName)s - %(levelname)s - %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
         },
     },
     "handlers": {
@@ -228,6 +257,14 @@ LOGGING = {
             "maxBytes": 20 * 1024 * 1024,
             "backupCount": 6,
         },
+        "django_auth_ldap": {
+            "level": INFO_OR_DEBUG_LEVEL,
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": f"{DJANGO_LOG_DIRECTORY}/django_auth_ldap.log",
+            "formatter": "stdfmt",
+            "maxBytes": 20 * 1024 * 1024,
+            "backupCount": 6,
+        },
     },
     "loggers": {
         "api_app": {
@@ -237,6 +274,11 @@ LOGGING = {
         },
         "celery": {
             "handlers": ["celery", "celery_error"],
+            "level": INFO_OR_DEBUG_LEVEL,
+            "propagate": True,
+        },
+        "django_auth_ldap": {
+            "handlers": ["django_auth_ldap"],
             "level": INFO_OR_DEBUG_LEVEL,
             "propagate": True,
         },
